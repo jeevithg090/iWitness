@@ -1,55 +1,46 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
-import { getServerSession } from "next-auth";
+import prisma from "@/lib/prisma";
+import { jsonError, tooManyRequests } from "@/lib/api";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { isValidReportId, normalizeReportId } from "@/lib/report-id";
 
-const prisma = new PrismaClient();
+export const dynamic = "force-dynamic";
 
-export async function GET(
-  request: Request,
-  { params }: { params: { reportId: string } }
-) {
+const limiter = createRateLimiter({ limit: 30, windowMs: 60 * 1000 });
+
+type Context = { params: Promise<{ reportId: string }> };
+
+/**
+ * Public status lookup by tracking ID. Only non-identifying fields are returned:
+ * the location, coordinates, description and image stay staff-only so a leaked
+ * ID cannot be used to learn where the reporter was.
+ */
+export async function GET(request: Request, { params }: Context) {
+  const rate = limiter(clientKey(request));
+  if (!rate.allowed) return tooManyRequests(rate);
+
+  const reportId = normalizeReportId((await params).reportId);
+  if (!isValidReportId(reportId)) {
+    return jsonError("Report IDs are 16 characters (0-9, a-f).", 400);
+  }
+
   try {
     const report = await prisma.report.findUnique({
-      where: {
-        reportId: params.reportId,
+      where: { reportId },
+      select: {
+        reportId: true,
+        type: true,
+        reportType: true,
+        title: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
       },
     });
-
-    if (!report) {
-      return NextResponse.json({ error: "Report not found" }, { status: 404 });
-    }
-
+    if (!report) return jsonError("Report not found.", 404);
     return NextResponse.json(report);
   } catch (error) {
-    console.error("Error fetching report details:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch report details" },
-      { status: 500 }
-    );
-  }
-}
-
-export async function PATCH(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
-  try {
-    const session = await getServerSession();
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { status } = await request.json();
-    const report = await prisma.report.update({
-      where: { id: params.id },
-      data: { status },
-    });
-
-    return NextResponse.json(report);
-  } catch (error) {
-    return NextResponse.json(
-      { error: "Error updating report" },
-      { status: 500 }
-    );
+    console.error("Failed to fetch report details:", error);
+    return jsonError("Could not look up the report. Please try again.", 503);
   }
 }

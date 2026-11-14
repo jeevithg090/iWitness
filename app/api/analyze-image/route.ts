@@ -1,47 +1,46 @@
 import { NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { analyzeImage, isAiConfigured } from "@/lib/ai";
+import {
+  jsonError,
+  readJson,
+  tooManyRequests,
+  validationError,
+} from "@/lib/api";
+import { parseImageDataUrl } from "@/lib/image";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { analyzeImageSchema } from "@/lib/validation";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+const limiter = createRateLimiter({ limit: 10, windowMs: 10 * 60 * 1000 });
 
+/** Uses Gemini to suggest a title, category and description for a photo. */
 export async function POST(request: Request) {
+  if (!isAiConfigured()) {
+    return jsonError("Image analysis is not configured on this server.", 503);
+  }
+
+  const rate = limiter(clientKey(request));
+  if (!rate.allowed) return tooManyRequests(rate);
+
+  const parsed = analyzeImageSchema.safeParse(await readJson(request));
+  if (!parsed.success) return validationError(parsed.error);
+
+  const image = parseImageDataUrl(parsed.data.image);
+  if (!image.ok) return jsonError(image.error, 400);
+
   try {
-    const { image } = await request.json();
-    const base64Data = image.split(",")[1];
-
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-
-    const prompt = `Analyze this emergency situation image and respond in this exact format without any asterisks or bullet points:
-TITLE: Write a clear, brief title
-TYPE: Choose one (Theft, Fire Outbreak, Medical Emergency, Natural Disaster, Violence, or Other)
-DESCRIPTION: Write a clear, concise description`;
-
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: base64Data,
-          mimeType: "image/jpeg",
-        },
-      },
-    ]);
-
-    const text = await result.response.text(); // Ensure text() is awaited
-
-    // Parse the response more precisely
-    const titleMatch = text.match(/TITLE:\s*(.+)/);
-    const typeMatch = text.match(/TYPE:\s*(.+)/);
-    const descMatch = text.match(/DESCRIPTION:\s*(.+)/);
-
-    return NextResponse.json({
-      title: titleMatch?.[1]?.trim() || "",
-      reportType: typeMatch?.[1]?.trim() || "",
-      description: descMatch?.[1]?.trim() || "",
-    });
+    const analysis = await analyzeImage(image.image);
+    if (!analysis.title && !analysis.description) {
+      return jsonError(
+        "Could not understand this image. Please fill in the details manually.",
+        422,
+      );
+    }
+    return NextResponse.json(analysis);
   } catch (error) {
-    console.error("Image analysis error:", error);
-    return NextResponse.json(
-      { error: "Failed to analyze image" },
-      { status: 500 }
+    console.error("Image analysis failed:", error);
+    return jsonError(
+      "Image analysis failed. You can still fill in the details manually.",
+      502,
     );
   }
 }
