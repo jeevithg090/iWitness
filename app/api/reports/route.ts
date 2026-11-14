@@ -1,81 +1,69 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-
-import { ReportStatus, ReportType } from "@prisma/client";
 import prisma from "@/lib/prisma";
-import { authOptions } from "@/lib/auth";
+import { getStaffSession } from "@/lib/auth";
+import { jsonError } from "@/lib/api";
+import { reportFiltersSchema } from "@/lib/validation";
 
-export async function GET(req: Request) {
+export const dynamic = "force-dynamic";
+
+/** Maximum number of reports returned to the dashboard in one request. */
+const MAX_RESULTS = 200;
+
+/** Staff-only: lists reports, newest first. Images are served separately. */
+export async function GET(request: Request) {
+  const session = await getStaffSession();
+  if (!session) return jsonError("Unauthorized", 401);
+
+  const { searchParams } = new URL(request.url);
+  const filters = reportFiltersSchema.safeParse({
+    status: searchParams.get("status") || undefined,
+    type: searchParams.get("type") || undefined,
+  });
+  if (!filters.success) return jsonError("Invalid filter.", 400);
+
+  const where = {
+    ...(filters.data.status && { status: filters.data.status }),
+    ...(filters.data.type && { type: filters.data.type }),
+  };
+
   try {
-    const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { searchParams } = new URL(req.url);
-    const status = searchParams.get("status") as ReportStatus | null;
-    const type = searchParams.get("type") as ReportType | null;
-
-    // Build the where clause based on filters
-    const where = {
-      ...(status && { status }),
-      ...(type && { type }),
-    };
-
-    // Add timeout and retry logic
-    const reports = await Promise.race([
+    const [reports, withImages] = await Promise.all([
       prisma.report.findMany({
         where,
-        orderBy: {
-          createdAt: "desc",
-        },
+        orderBy: { createdAt: "desc" },
+        take: MAX_RESULTS,
         select: {
           id: true,
           reportId: true,
           type: true,
+          reportType: true,
           title: true,
           description: true,
           location: true,
           latitude: true,
           longitude: true,
-          image: true,
           status: true,
           createdAt: true,
           updatedAt: true,
         },
       }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Database timeout")), 15000)
-      ),
+      prisma.report.findMany({
+        where: { ...where, image: { not: null } },
+        orderBy: { createdAt: "desc" },
+        take: MAX_RESULTS,
+        select: { id: true },
+      }),
     ]);
 
-    return NextResponse.json(reports);
-  } catch (error: any) {
-    console.error("Failed to fetch reports:", error);
-
-    // More specific error messages
-    if (error.code === "P1001") {
-      return NextResponse.json(
-        { error: "Cannot connect to database. Please try again later." },
-        { status: 503 }
-      );
-    }
-
-    if (error.code === "P2024") {
-      return NextResponse.json(
-        { error: "Database connection timeout. Please try again." },
-        { status: 504 }
-      );
-    }
-
+    const imageIds = new Set(withImages.map((r) => r.id));
     return NextResponse.json(
-      { error: "Failed to fetch reports" },
-      { status: 500 }
+      reports.map((report) => ({
+        ...report,
+        hasImage: imageIds.has(report.id),
+      })),
     );
-  } finally {
-    // Optional: Disconnect for serverless environments
-    if (process.env.VERCEL) {
-      await prisma.$disconnect();
-    }
+  } catch (error) {
+    console.error("Failed to fetch reports:", error);
+    return jsonError("Could not load reports. Please try again.", 503);
   }
 }
