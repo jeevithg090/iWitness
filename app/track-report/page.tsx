@@ -1,13 +1,32 @@
-"use client";
-import { ReportTracker } from "@/components/report/ReportTracker";
+import type { Metadata } from "next";
+import { Search } from "lucide-react";
+import { PageHeader } from "@/components/ui/page-header";
+import { ReportTracker } from "@/components/report/report-tracker";
 
-export default function TrackReportPage() {
+export const metadata: Metadata = {
+  title: "Track a report",
+  description:
+    "Check the status of an anonymous report using your private report ID.",
+};
+
+export default async function TrackReportPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ id?: string | string[] }>;
+}) {
+  const { id } = await searchParams;
+  const initialId = typeof id === "string" ? id : "";
+
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center">
-      <div className="container mx-auto px-4 sm:px-6 lg:px-8 flex justify-center">
-        <div className="w-full max-w-5xl">
-          <ReportTracker />
-        </div>
+    <div className="container py-12 sm:py-16">
+      <PageHeader
+        eyebrow="Track your report"
+        eyebrowIcon={<Search aria-hidden="true" />}
+        title="Check your report status"
+        description="Enter the report ID you received after submitting to see where it stands."
+      />
+      <div className="mt-10">
+        <ReportTracker initialId={initialId} />
       </div>
     </div>
   );
